@@ -1,0 +1,7 @@
+networkx
+scikit-learn
+gensim
+torch
+torch-geometric
+node2vec
+tensorflow
