@@ -178,7 +178,7 @@ def main():
     feature_dim = 128
     encoder_types = ["gcn", "sage"]
     ae_epochs = 100  # paper-like: 100 epochs for construction loss
-    ae_batch_size = 64
+    ae_batch_size = 256
     # === Contrastive learning utilities ===
     def graph_augment(X, drop_prob=0.2):
         mask = np.random.binomial(1, 1-drop_prob, X.shape)
@@ -198,8 +198,8 @@ def main():
         loss2 = tf.keras.losses.sparse_categorical_crossentropy(labels, similarity_matrix[batch_size:, :batch_size], from_logits=True)
         return tf.reduce_mean(loss1 + loss2)
 
-    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=128, temperature=0.005, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
-        batch_size = 128
+    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=256, temperature=0.005, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
+        batch_size = 256
         out_dim = 64
         input_layer = layers.Input(shape=(X.shape[1],))
         proj = layers.Dense(out_dim, activation='relu')(input_layer)
