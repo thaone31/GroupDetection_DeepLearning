@@ -274,7 +274,7 @@ def main():
             if embedding_deepwalk.shape[1] > feature_dim:
                 print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
                 # Pass A and comm_labels into autoencoder_reduce closure
-                def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
+                def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=128, verbose=0, laplacian_reg=True, reg_weight=1.0,
                                                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0):
                     # Use A and comm_labels from outer scope
                     input_dim = X.shape[1]
