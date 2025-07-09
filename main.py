@@ -71,11 +71,7 @@ def main():
         (2, "Dolphins"),
         (3, "Football"),
         (4, "Email"),
-        (5, "Wiki Vote"),
-        (6, "Facebook"),
-        (7, "Amazon"),
-        (8, "DBLP"),
-        (9, "YouTube")
+        (6, "Facebook")
     ]
     embeddings = [
         (1, "deepwalk"),
