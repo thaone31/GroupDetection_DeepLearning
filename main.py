@@ -133,10 +133,14 @@ def main():
             if G is not None and ground_truth is not None:
                 break
         if G is not None:
-            import networkx as nx
-            A = nx.to_numpy_array(G)
+            if G.number_of_nodes() < 10000:
+                import networkx as nx
+                A = nx.to_numpy_array(G)
+            else:
+                print(f"[WARNING] Graph {getattr(G, 'name', 'unknown')} quá lớn ({G.number_of_nodes()} nodes), bỏ qua adjacency matrix cho loss.")
+                A = None
         else:
-            A = np.ones((X.shape[0], X.shape[0])) - np.eye(X.shape[0])
+            A = None
         if ground_truth is not None:
             comm_labels = np.array(ground_truth)
         else:
@@ -144,29 +148,31 @@ def main():
 
         def custom_loss(y_true, y_pred):
             mse_loss = losses.MeanSquaredError()(y_true, y_pred)
-            Z = encoder(y_true)
-            n = tf.shape(Z)[0]
-            A_tf = tf.convert_to_tensor(A, dtype=tf.float32)
-            deg = tf.reduce_sum(A_tf, axis=1, keepdims=True)
-            m = tf.reduce_sum(deg) / 2.0 + 1e-8
-            Z_norm = tf.math.l2_normalize(Z, axis=1)
-            dot = tf.matmul(Z_norm, Z_norm, transpose_b=True)
-            deg_prod = tf.matmul(deg, tf.transpose(deg)) / (2.0 * m)
-            modularity_matrix = A_tf - deg_prod
-            modularity_score = tf.reduce_sum(modularity_matrix * dot) / (2.0 * m)
-            modularity_loss = -modularity_score
+            if A is not None:
+                Z = encoder(y_true)
+                n = tf.shape(Z)[0]
+                A_tf = tf.convert_to_tensor(A, dtype=tf.float32)
+                deg = tf.reduce_sum(A_tf, axis=1, keepdims=True)
+                m = tf.reduce_sum(deg) / 2.0 + 1e-8
+                Z_norm = tf.math.l2_normalize(Z, axis=1)
+                dot = tf.matmul(Z_norm, Z_norm, transpose_b=True)
+                deg_prod = tf.matmul(deg, tf.transpose(deg)) / (2.0 * m)
+                modularity_matrix = A_tf - deg_prod
+                modularity_score = tf.reduce_sum(modularity_matrix * dot) / (2.0 * m)
+                modularity_loss = -modularity_score
 
-            comm_labels_tf = tf.convert_to_tensor(comm_labels, dtype=tf.int32)
-            mask_same = tf.cast(tf.equal(tf.expand_dims(comm_labels_tf, 1), tf.expand_dims(comm_labels_tf, 0)), tf.float32)
-            mask_diff = 1.0 - mask_same
-            dists = tf.norm(tf.expand_dims(Z, 1) - tf.expand_dims(Z, 0), axis=2)
-            same_mean = tf.reduce_sum(dists * mask_same) / (tf.reduce_sum(mask_same) + 1e-8)
-            diff_mean = tf.reduce_sum(dists * mask_diff) / (tf.reduce_sum(mask_diff) + 1e-8)
-            neigh_loss = same_mean / (diff_mean + 1e-8)
-
+                comm_labels_tf = tf.convert_to_tensor(comm_labels, dtype=tf.int32)
+                mask_same = tf.cast(tf.equal(tf.expand_dims(comm_labels_tf, 1), tf.expand_dims(comm_labels_tf, 0)), tf.float32)
+                mask_diff = 1.0 - mask_same
+                dists = tf.norm(tf.expand_dims(Z, 1) - tf.expand_dims(Z, 0), axis=2)
+                same_mean = tf.reduce_sum(dists * mask_same) / (tf.reduce_sum(mask_same) + 1e-8)
+                diff_mean = tf.reduce_sum(dists * mask_diff) / (tf.reduce_sum(mask_diff) + 1e-8)
+                neigh_loss = same_mean / (diff_mean + 1e-8)
+            else:
+                modularity_loss = 0.0
+                neigh_loss = 0.0
             total_loss = mse_loss + 0.1 * modularity_loss + 0.1 * neigh_loss
             return total_loss
-
         autoencoder.compile(optimizer=optimizer, loss=custom_loss)
         autoencoder.fit(X, X, epochs=300, batch_size=min(batch_size, X.shape[0]), verbose=verbose)
         reduced = encoder.predict(X)
@@ -178,7 +184,7 @@ def main():
     feature_dim = 128
     encoder_types = ["gcn", "sage"]
     ae_epochs = 100  # paper-like: 100 epochs for construction loss
-    ae_batch_size = 256
+    ae_batch_size = 64
     # === Contrastive learning utilities ===
     def graph_augment(X, drop_prob=0.2):
         mask = np.random.binomial(1, 1-drop_prob, X.shape)
@@ -198,8 +204,8 @@ def main():
         loss2 = tf.keras.losses.sparse_categorical_crossentropy(labels, similarity_matrix[batch_size:, :batch_size], from_logits=True)
         return tf.reduce_mean(loss1 + loss2)
 
-    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=256, temperature=0.005, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
-        batch_size = 256
+    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=128, temperature=0.005, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
+        batch_size = 128
         out_dim = 64
         input_layer = layers.Input(shape=(X.shape[1],))
         proj = layers.Dense(out_dim, activation='relu')(input_layer)
@@ -249,7 +255,7 @@ def main():
         K.clear_session()
         return out
 
-    
+
     # ==== Configurable lambda weights for contrastive projection loss ====
     LAMBDA_CONTRASTIVE = 2.0  # λ1: weight for contrastive loss
     LAMBDA_SUP = 0.5          # λ2: weight for supervised loss
@@ -262,7 +268,11 @@ def main():
         for ds_choice, ds_name in datasets:
             G, _, ground_truth = load_dataset(ds_choice)
             # --- Auto extract adjacency matrix A and comm_labels from G and ground_truth ---
-            A = nx.to_numpy_array(G)
+            if G.number_of_nodes() < 10000:
+                A = nx.to_numpy_array(G)
+            else:
+                print(f"[WARNING] Graph {ds_name} quá lớn ({G.number_of_nodes()} nodes), bỏ qua adjacency matrix cho loss.")
+                A = None
             if ground_truth is not None:
                 comm_labels = np.array(ground_truth)
             else:
@@ -274,7 +284,7 @@ def main():
             if embedding_deepwalk.shape[1] > feature_dim:
                 print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
                 # Pass A and comm_labels into autoencoder_reduce closure
-                def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=128, verbose=0, laplacian_reg=True, reg_weight=1.0,
+                def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
                                                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0):
                     # Use A and comm_labels from outer scope
                     input_dim = X.shape[1]
