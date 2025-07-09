@@ -71,7 +71,10 @@ def main():
         (2, "Dolphins"),
         (3, "Football"),
         (4, "Email"),
-        (6, "Facebook")
+        (5, "Facebook"),
+        (6, "Amazon"),
+        (7, "DBLP"),
+        (8, "YouTube")
     ]
     embeddings = [
         (1, "deepwalk"),
@@ -256,61 +259,65 @@ def main():
     LAMBDA_CONTRASTIVE = 2.0  # λ1: weight for contrastive loss
     LAMBDA_SUP = 0.5          # λ2: weight for supervised loss
 
+    # Prompt user to select dataset
+    print("=== Chọn dataset để chạy 20 lần ===")
+    for i, name in datasets:
+        print(f"{i}. {name}")
+    ds_choice = int(input(f"Nhập số (1-{len(datasets)}): "))
+    ds_name = dict(datasets)[ds_choice]
+    print(f"[INFO] Đang chạy 20 lần trên dataset: {ds_name}")
+
     N_RUNS = 20
     all_results = []
     for run in range(N_RUNS):
         print(f"\n================= RUN {run+1}/{N_RUNS} =================")
         run_results = []
-        for ds_choice, ds_name in datasets:
-            G, _, ground_truth = load_dataset(ds_choice)
-            # --- Auto extract adjacency matrix A and comm_labels from G and ground_truth ---
-            if G.number_of_nodes() < 10000:
-                A = nx.to_numpy_array(G)
-            else:
-                print(f"[WARNING] Graph {ds_name} quá lớn ({G.number_of_nodes()} nodes), bỏ qua adjacency matrix cho loss.")
-                A = None
-            if ground_truth is not None:
-                comm_labels = np.array(ground_truth)
-            else:
-                # If no ground_truth, assign all nodes to one community (dummy)
-                comm_labels = np.zeros(len(G.nodes()), dtype=int)
-            embedding_node2vec = node2vec_embedding(G, dim=feature_dim, **walk_params)
-            embedding_deepwalk = deepwalk_embedding(G, dim=feature_dim, **walk_params)
-            # Quay lại: Autoencoder đầu vào chỉ là DeepWalk
-            if embedding_deepwalk.shape[1] > feature_dim:
-                print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
-                # Pass A and comm_labels into autoencoder_reduce closure
-                def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
-                                                lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0):
-                    # Use A and comm_labels from outer scope
-                    input_dim = X.shape[1]
-                    input_layer = layers.Input(shape=(input_dim,))
-                    hidden_dim = max(out_dim * 2, 32)
-                    # Encoder
-                    x = layers.Dense(hidden_dim)(input_layer)
-                    x = layers.LeakyReLU(alpha=0.1)(x)
-                    encoded = layers.Dense(out_dim)(x)
-                    encoded = layers.ELU(alpha=1.0)(encoded)
-                    # Decoder
-                    x_dec = layers.Dense(hidden_dim)(encoded)
-                    x_dec = layers.LeakyReLU(alpha=0.1)(x_dec)
-                    decoded = layers.Dense(input_dim, activation='linear')(x_dec)
-                    # Classifier head for supervised loss (if labels available)
-                    n_classes = int(np.max(comm_labels)) + 1 if comm_labels is not None and len(np.unique(comm_labels)) > 1 else 1
-                    classifier_out = layers.Dense(n_classes, activation='softmax', name='classifier')(encoded)
-                    # Model for AE and classifier
-                    autoencoder = keras_models.Model(input_layer, [decoded, classifier_out])
-                    encoder = keras_models.Model(input_layer, encoded)
-                    optimizer = optimizers.Adam(learning_rate=0.005)
-                    # Prepare y_class for supervised loss if possible
-                    if comm_labels is not None and n_classes > 1:
-                        y_class = tf.keras.utils.to_categorical(comm_labels, num_classes=n_classes)
-                    else:
-                        y_class = None
-                    def custom_loss(y_true, y_pred):
-                        # y_pred: [decoded, classifier_out]
-                        decoded_pred, class_pred = y_pred
-                        mse_loss = losses.MeanSquaredError()(y_true, decoded_pred)
+        # Only run for the selected dataset
+        G, _, ground_truth = load_dataset(ds_choice)
+        if G.number_of_nodes() < 10000:
+            A = nx.to_numpy_array(G)
+        else:
+            print(f"[WARNING] Graph {ds_name} quá lớn ({G.number_of_nodes()} nodes), bỏ qua adjacency matrix cho loss.")
+            A = None
+        if ground_truth is not None:
+            comm_labels = np.array(ground_truth)
+        else:
+            comm_labels = np.zeros(len(G.nodes()), dtype=int)
+        embedding_node2vec = node2vec_embedding(G, dim=feature_dim, **walk_params)
+        embedding_deepwalk = deepwalk_embedding(G, dim=feature_dim, **walk_params)
+        if embedding_deepwalk.shape[1] > feature_dim:
+            print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
+            def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
+                                            lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0):
+                input_dim = X.shape[1]
+                input_layer = layers.Input(shape=(input_dim,))
+                hidden_dim = max(out_dim * 2, 32)
+                # Encoder
+                x = layers.Dense(hidden_dim)(input_layer)
+                x = layers.LeakyReLU(alpha=0.1)(x)
+                encoded = layers.Dense(out_dim)(x)
+                encoded = layers.ELU(alpha=1.0)(encoded)
+                # Decoder
+                x_dec = layers.Dense(hidden_dim)(encoded)
+                x_dec = layers.LeakyReLU(alpha=0.1)(x_dec)
+                decoded = layers.Dense(input_dim, activation='linear')(x_dec)
+                # Classifier head for supervised loss (if labels available)
+                n_classes = int(np.max(comm_labels)) + 1 if comm_labels is not None and len(np.unique(comm_labels)) > 1 else 1
+                classifier_out = layers.Dense(n_classes, activation='softmax', name='classifier')(encoded)
+                # Model for AE and classifier
+                autoencoder = keras_models.Model(input_layer, [decoded, classifier_out])
+                encoder = keras_models.Model(input_layer, encoded)
+                optimizer = optimizers.Adam(learning_rate=0.005)
+                # Prepare y_class for supervised loss if possible
+                if comm_labels is not None and n_classes > 1:
+                    y_class = tf.keras.utils.to_categorical(comm_labels, num_classes=n_classes)
+                else:
+                    y_class = None
+                def custom_loss(y_true, y_pred):
+                    # y_pred: [decoded, classifier_out]
+                    decoded_pred, class_pred = y_pred
+                    mse_loss = losses.MeanSquaredError()(y_true, decoded_pred)
+                    if A is not None:
                         Z = encoder(y_true)
                         n = tf.shape(Z)[0]
                         A_tf = tf.convert_to_tensor(A, dtype=tf.float32)
@@ -329,102 +336,104 @@ def main():
                         same_mean = tf.reduce_sum(dists * mask_same) / (tf.reduce_sum(mask_same) + 1e-8)
                         diff_mean = tf.reduce_sum(dists * mask_diff) / (tf.reduce_sum(mask_diff) + 1e-8)
                         neigh_loss = same_mean / (diff_mean + 1e-8)
-                        # Supervised loss (cross-entropy)
-                        if y_class is not None:
-                            sup_loss = losses.CategoricalCrossentropy()(y_class, class_pred)
-                        else:
-                            sup_loss = 0.0
-                        total_loss = (
-                            lambda_recon * mse_loss +
-                            lambda_mod * modularity_loss +
-                            lambda_neigh * neigh_loss +
-                            lambda_sup * sup_loss
-                        )
-                        return total_loss
-                    autoencoder.compile(optimizer=optimizer, loss=custom_loss)
-                    # Fit: y = X, but output is [X, y_class] (y_class only used in loss)
-                    autoencoder.fit(X, [X, y_class] if y_class is not None else [X, np.zeros((X.shape[0], n_classes))],
-                                    epochs=300, batch_size=min(batch_size, X.shape[0]), verbose=verbose)
-                    reduced = encoder.predict(X)
-                    K.clear_session()
-                    return reduced
-                embedding_deepwalk_ae = autoencoder_reduce_with_graph(
-                    embedding_deepwalk, feature_dim, epochs=ae_epochs, batch_size=ae_batch_size, verbose=0,
-                    lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
-            else:
-                embedding_deepwalk_ae = embedding_deepwalk
-            emb_gat = gt_embedding(G, dim=feature_dim)
-            embedding_deepwalk_ae_contrast = contrastive_projection(
-                embedding_deepwalk_ae, out_dim=feature_dim, epochs=10, temperature=0.005,
-                comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
-            results_table = []
-            for emb_type, embedding_feature in [
-                    ("deepwalk", embedding_deepwalk),
-                    ("node2vec", embedding_node2vec),
-                    ("gat", emb_gat),
-                    ("deepwalk_ae", embedding_deepwalk_ae),
-                    ("deepwalk_ae_contrast", embedding_deepwalk_ae_contrast)
-                ]:
-                if embedding_feature is None:
-                    continue
-                for encoder_type in encoder_types:
-                    print(f"\n==== Dataset={ds_name}, Embedding={emb_type}, Model=GAE, Encoder={encoder_type}, feature_dim={embedding_feature.shape[1]} ====")
-                    model_kwargs = {"feature_type": "custom", "feature_dim": embedding_feature.shape[1]}
-                    model = GAE(**model_kwargs)
-                    model.fit(G, features=embedding_feature, encoder_type=encoder_type)
-                    embeddings_out = model.get_embedding()
-                    embeddings_out = preprocess_embedding(embeddings_out)
-                    best_k, modularity, ari, nmi, labels, elbow_k, elbow_modularity, elbow_labels, inertias = find_best_k(embeddings_out, G, ground_truth)
-                    cluster_results = cluster_all(embeddings_out, G, n_clusters=best_k)
-                    for method, metrics in cluster_results.items():
-                        if ground_truth is not None:
-                            ari_val = adjusted_rand_score(ground_truth, metrics['labels'])
-                            nmi_val = normalized_mutual_info_score(ground_truth, metrics['labels'])
-                        else:
-                            ari_val = None
-                            nmi_val = None
-                        def compute_conductance_coverage(G, labels):
-                            communities = defaultdict(list)
-                            for node, label in zip(G.nodes(), labels):
-                                communities[label].append(node)
-                            conductances = []
-                            coverages = []
-                            for nodes in communities.values():
-                                if len(nodes) == 0 or len(nodes) == len(G):
-                                    continue
-                                cut_size = nx.cut_size(G, nodes)
-                                volume = nx.volume(G, nodes)
-                                if volume > 0:
-                                    conductances.append(cut_size / volume)
-                                else:
-                                    conductances.append(0)
-                                subgraph = G.subgraph(nodes)
-                                internal_edges = subgraph.number_of_edges()
-                                total_edges = G.number_of_edges()
-                                if total_edges > 0:
-                                    coverages.append(internal_edges / total_edges)
-                                else:
-                                    coverages.append(0)
-                            conductance = np.mean(conductances) if conductances else 0
-                            coverage = np.sum(coverages) if coverages else 0
-                            return conductance, coverage
-                        conductance_val, coverage_val = compute_conductance_coverage(G, metrics['labels'])
-                        results_table.append({
-                            "Dataset": ds_name,
-                            "Embedding": emb_type,
-                            "Encoder": encoder_type,
-                            "ClusterMethod": method,
-                            "BestK": best_k,
-                            "Modularity": metrics['modularity'],
-                            "Silhouette": metrics['silhouette'],
-                            "NumClusters": len(set(metrics['labels'])),
-                            "ARI": ari_val,
-                            "NMI": nmi_val,
-                            "Conductance": conductance_val,
-                            "Coverage": coverage_val
-                        })
-                        print(f"  - {method}: Modularity={metrics['modularity']}, Silhouette={metrics['silhouette']}, Số cụm={len(set(metrics['labels']))}, ARI={ari_val}, NMI={nmi_val}, Conductance={conductance_val:.4f}, Coverage={coverage_val:.4f}")
-            run_results.extend(results_table)
+                    else:
+                        modularity_loss = 0.0
+                        neigh_loss = 0.0
+                    if y_class is not None:
+                        sup_loss = losses.CategoricalCrossentropy()(y_class, class_pred)
+                    else:
+                        sup_loss = 0.0
+                    total_loss = (
+                        lambda_recon * mse_loss +
+                        lambda_mod * modularity_loss +
+                        lambda_neigh * neigh_loss +
+                        lambda_sup * sup_loss
+                    )
+                    return total_loss
+                autoencoder.compile(optimizer=optimizer, loss=custom_loss)
+                # Fit: y = X, but output is [X, y_class] (y_class only used in loss)
+                autoencoder.fit(X, [X, y_class] if y_class is not None else [X, np.zeros((X.shape[0], n_classes))],
+                                epochs=300, batch_size=min(batch_size, X.shape[0]), verbose=0)
+                reduced = encoder.predict(X)
+                K.clear_session()
+                return reduced
+            embedding_deepwalk_ae = autoencoder_reduce_with_graph(
+                embedding_deepwalk, feature_dim, epochs=ae_epochs, batch_size=ae_batch_size, verbose=0,
+                lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
+        else:
+            embedding_deepwalk_ae = embedding_deepwalk
+        emb_gat = gt_embedding(G, dim=feature_dim)
+        embedding_deepwalk_ae_contrast = contrastive_projection(
+            embedding_deepwalk_ae, out_dim=feature_dim, epochs=10, temperature=0.005,
+            comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
+        results_table = []
+        for emb_type, embedding_feature in [
+                ("deepwalk", embedding_deepwalk),
+                ("node2vec", embedding_node2vec),
+                ("gat", emb_gat),
+                ("deepwalk_ae", embedding_deepwalk_ae),
+                ("deepwalk_ae_contrast", embedding_deepwalk_ae_contrast)
+            ]:
+            if embedding_feature is None:
+                continue
+            for encoder_type in encoder_types:
+                print(f"\n==== Dataset={ds_name}, Embedding={emb_type}, Model=GAE, Encoder={encoder_type}, feature_dim={embedding_feature.shape[1]} ====")
+                model_kwargs = {"feature_type": "custom", "feature_dim": embedding_feature.shape[1]}
+                model = GAE(**model_kwargs)
+                model.fit(G, features=embedding_feature, encoder_type=encoder_type)
+                embeddings_out = model.get_embedding()
+                embeddings_out = preprocess_embedding(embeddings_out)
+                best_k, modularity, ari, nmi, labels, elbow_k, elbow_modularity, elbow_labels, inertias = find_best_k(embeddings_out, G, ground_truth)
+                cluster_results = cluster_all(embeddings_out, G, n_clusters=best_k)
+                for method, metrics in cluster_results.items():
+                    if ground_truth is not None:
+                        ari_val = adjusted_rand_score(ground_truth, metrics['labels'])
+                        nmi_val = normalized_mutual_info_score(ground_truth, metrics['labels'])
+                    else:
+                        ari_val = None
+                        nmi_val = None
+                    def compute_conductance_coverage(G, labels):
+                        communities = defaultdict(list)
+                        for node, label in zip(G.nodes(), labels):
+                            communities[label].append(node)
+                        conductances = []
+                        coverages = []
+                        for nodes in communities.values():
+                            if len(nodes) == 0 or len(nodes) == len(G):
+                                continue
+                            cut_size = nx.cut_size(G, nodes)
+                            volume = nx.volume(G, nodes)
+                            if volume > 0:
+                                conductances.append(cut_size / volume)
+                            else:
+                                conductances.append(0)
+                            subgraph = G.subgraph(nodes)
+                            internal_edges = subgraph.number_of_edges()
+                            total_edges = G.number_of_edges()
+                            if total_edges > 0:
+                                coverages.append(internal_edges / total_edges)
+                            else:
+                                coverages.append(0)
+                        conductance = np.mean(conductances) if conductances else 0
+                        coverage = np.sum(coverages) if coverages else 0
+                        return conductance, coverage
+                    conductance_val, coverage_val = compute_conductance_coverage(G, metrics['labels'])
+                    results_table.append({
+                        "Dataset": ds_name,
+                        "Embedding": emb_type,
+                        "Encoder": encoder_type,
+                        "ClusterMethod": method,
+                        "BestK": best_k,
+                        "Modularity": metrics['modularity'],
+                        "Silhouette": metrics['silhouette'],
+                        "NumClusters": len(set(metrics['labels'])),
+                        "ARI": ari_val,
+                        "NMI": nmi_val,
+                        "Conductance": conductance_val,
+                        "Coverage": coverage_val
+                    })
+                    print(f"  - {method}: Modularity={metrics['modularity']}, Silhouette={metrics['silhouette']}, Số cụm={len(set(metrics['labels']))}, ARI={ari_val}, NMI={nmi_val}, Conductance={conductance_val:.4f}, Coverage={coverage_val:.4f}")
+        run_results.extend(results_table)
         # In bảng kết quả từng lần chạy
         if run_results:
             run_df = pd.DataFrame(run_results)
