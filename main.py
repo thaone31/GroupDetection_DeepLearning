@@ -283,6 +283,15 @@ def main():
         run_results = []
         # Only run for the selected dataset
         G, _, ground_truth = load_dataset(ds_choice)
+        # Nếu là dataset lớn, lấy subgraph nhỏ hơn để test nhanh (ví dụ: 10,000 nodes đầu tiên)
+        if ds_name in ["YouTube", "DBLP", "Amazon"] and G.number_of_nodes() > 10000:
+            print(f"[INFO] Lấy subgraph nhỏ hơn (10,000 nodes đầu tiên) để test nhanh trên {ds_name}...")
+            nodes_subset = list(G.nodes())[:10000]
+            G = G.subgraph(nodes_subset).copy()
+            if ground_truth is not None and len(ground_truth) == len(nodes_subset):
+                ground_truth = [ground_truth[n] for n in nodes_subset]
+            else:
+                ground_truth = None
         # Luôn dùng batch_size mặc định cho mọi dataset (không giảm cho các dataset lớn)
         ae_batch_size_run = ae_batch_size
         if G.number_of_nodes() < 10000:
