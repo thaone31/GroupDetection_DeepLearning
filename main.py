@@ -1,3 +1,4 @@
+
 import numpy as np
 import networkx as nx
 from models.gae import GAE
@@ -11,6 +12,15 @@ import tensorflow.keras.models as keras_models
 import pandas as pd
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from collections import defaultdict
+
+# --- Thêm: Bật memory growth cho GPU TensorFlow để tránh treo máy khi allocate toàn bộ GPU memory ---
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
 
 
 
@@ -289,6 +299,9 @@ def main():
             comm_labels = np.zeros(len(G.nodes()), dtype=int)
         embedding_node2vec = node2vec_embedding(G, dim=feature_dim, **walk_params)
         embedding_deepwalk = deepwalk_embedding(G, dim=feature_dim, **walk_params)
+        # Ép kiểu float32 cho embedding để tiết kiệm RAM và tránh lỗi dtype
+        embedding_node2vec = embedding_node2vec.astype(np.float32)
+        embedding_deepwalk = embedding_deepwalk.astype(np.float32)
         if embedding_deepwalk.shape[1] > feature_dim:
             print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
             def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
