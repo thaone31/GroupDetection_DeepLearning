@@ -93,9 +93,6 @@ def main():
         (3, "Agglomerative"),
     ]
 
-
-
-
     print("Đang chạy toàn bộ các trường hợp so sánh...")
     feature_dim = 64
 
@@ -184,6 +181,8 @@ def main():
     encoder_types = ["gcn", "sage"]
     ae_epochs = 100  # paper-like: 100 epochs for construction loss
     ae_batch_size = 64
+    # Giảm batch_size cho các dataset lớn
+    LARGE_DATASETS = ["DBLP", "YouTube", "Amazon"]
     # === Contrastive learning utilities ===
     def graph_augment(X, drop_prob=0.2):
         mask = np.random.binomial(1, 1-drop_prob, X.shape)
@@ -274,6 +273,11 @@ def main():
         run_results = []
         # Only run for the selected dataset
         G, _, ground_truth = load_dataset(ds_choice)
+        # Điều chỉnh batch_size nhỏ cho các dataset lớn
+        if ds_name in LARGE_DATASETS:
+            ae_batch_size_run = 16
+        else:
+            ae_batch_size_run = ae_batch_size
         if G.number_of_nodes() < 10000:
             A = nx.to_numpy_array(G)
         else:
@@ -358,7 +362,7 @@ def main():
                 K.clear_session()
                 return reduced
             embedding_deepwalk_ae = autoencoder_reduce_with_graph(
-                embedding_deepwalk, feature_dim, epochs=ae_epochs, batch_size=ae_batch_size, verbose=0,
+                embedding_deepwalk, feature_dim, epochs=ae_epochs, batch_size=ae_batch_size_run, verbose=0,
                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
         else:
             embedding_deepwalk_ae = embedding_deepwalk
