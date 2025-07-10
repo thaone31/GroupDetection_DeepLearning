@@ -189,7 +189,7 @@ def main():
     walk_params = dict(num_walks=20, walk_length=40)
     feature_dim = 128
     encoder_types = ["gcn", "sage"]
-    ae_epochs = 10  # Giảm epoch để test nhanh
+    ae_epochs = 50  # Tăng epoch AE để học tốt hơn
     ae_batch_size = 64
     # Giảm batch_size cho các dataset lớn
     LARGE_DATASETS = ["DBLP", "YouTube", "Amazon"]
@@ -276,7 +276,7 @@ def main():
     ds_name = dict(datasets)[ds_choice]
     print(f"[INFO] Đang chạy 1 lần trên dataset: {ds_name}")
 
-    N_RUNS = 1
+    N_RUNS = 20
     all_results = []
     for run in range(N_RUNS):
         print(f"\n================= RUN {run+1}/{N_RUNS} =================")
@@ -405,7 +405,7 @@ def main():
             embedding_deepwalk_ae = embedding_deepwalk
         emb_gat = gt_embedding(G, dim=feature_dim)
         embedding_deepwalk_ae_contrast = contrastive_projection(
-            embedding_deepwalk_ae, out_dim=feature_dim, epochs=10, temperature=0.005,
+            embedding_deepwalk_ae, out_dim=feature_dim, epochs=100, temperature=0.005,
             comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
         results_table = []
         for emb_type, embedding_feature in [
