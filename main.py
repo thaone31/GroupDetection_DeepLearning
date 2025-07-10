@@ -283,11 +283,8 @@ def main():
         run_results = []
         # Only run for the selected dataset
         G, _, ground_truth = load_dataset(ds_choice)
-        # Điều chỉnh batch_size nhỏ cho các dataset lớn
-        if ds_name in LARGE_DATASETS:
-            ae_batch_size_run = 16
-        else:
-            ae_batch_size_run = ae_batch_size
+        # Luôn dùng batch_size mặc định cho mọi dataset (không giảm cho các dataset lớn)
+        ae_batch_size_run = ae_batch_size
         if G.number_of_nodes() < 10000:
             A = nx.to_numpy_array(G)
         else:
