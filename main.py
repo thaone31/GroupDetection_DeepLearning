@@ -364,13 +364,31 @@ def main():
                         lambda_sup * sup_loss
                     )
                     return total_loss
-                autoencoder.compile(optimizer=optimizer, loss=custom_loss)
-                # Fit: y = X, but output is [X, y_class] (y_class only used in loss)
-                autoencoder.fit(X, [X, y_class] if y_class is not None else [X, np.zeros((X.shape[0], n_classes))],
-                                epochs=300, batch_size=min(batch_size, X.shape[0]), verbose=0)
-                reduced = encoder.predict(X)
-                K.clear_session()
-                return reduced
+                # --- Mini-batch training loop cho các dataset lớn ---
+                if ds_name in ["DBLP", "YouTube", "Amazon"]:
+                    dataset = tf.data.Dataset.from_tensor_slices((X, X))
+                    dataset = dataset.batch(batch_size)
+                    for epoch in range(epochs):
+                        losses_epoch = []
+                        for batch_x, batch_y in dataset:
+                            with tf.GradientTape() as tape:
+                                decoded_pred, class_pred = autoencoder(batch_x, training=True)
+                                loss = custom_loss(batch_y, [decoded_pred, class_pred])
+                            grads = tape.gradient(loss, autoencoder.trainable_weights)
+                            optimizer.apply_gradients(zip(grads, autoencoder.trainable_weights))
+                            losses_epoch.append(loss.numpy())
+                        if epoch % 20 == 0:
+                            print(f"[Mini-batch AE][{ds_name}] epoch {epoch}, loss={np.mean(losses_epoch):.4f}")
+                    reduced = encoder.predict(X, batch_size=batch_size)
+                    K.clear_session()
+                    return reduced
+                else:
+                    autoencoder.compile(optimizer=optimizer, loss=custom_loss)
+                    autoencoder.fit(X, [X, y_class] if y_class is not None else [X, np.zeros((X.shape[0], n_classes))],
+                                    epochs=300, batch_size=min(batch_size, X.shape[0]), verbose=0)
+                    reduced = encoder.predict(X)
+                    K.clear_session()
+                    return reduced
             embedding_deepwalk_ae = autoencoder_reduce_with_graph(
                 embedding_deepwalk, feature_dim, epochs=ae_epochs, batch_size=ae_batch_size_run, verbose=0,
                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
