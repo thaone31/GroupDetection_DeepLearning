@@ -189,7 +189,7 @@ def main():
     walk_params = dict(num_walks=20, walk_length=40)
     feature_dim = 128
     encoder_types = ["gcn", "sage"]
-    ae_epochs = 100  # paper-like: 100 epochs for construction loss
+    ae_epochs = 10  # Giảm epoch để test nhanh
     ae_batch_size = 64
     # Giảm batch_size cho các dataset lớn
     LARGE_DATASETS = ["DBLP", "YouTube", "Amazon"]
@@ -274,9 +274,9 @@ def main():
         print(f"{i}. {name}")
     ds_choice = int(input(f"Nhập số (1-{len(datasets)}): "))
     ds_name = dict(datasets)[ds_choice]
-    print(f"[INFO] Đang chạy 20 lần trên dataset: {ds_name}")
+    print(f"[INFO] Đang chạy 1 lần trên dataset: {ds_name}")
 
-    N_RUNS = 20
+    N_RUNS = 1
     all_results = []
     for run in range(N_RUNS):
         print(f"\n================= RUN {run+1}/{N_RUNS} =================")
