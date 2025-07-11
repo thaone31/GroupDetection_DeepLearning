@@ -81,10 +81,11 @@ def main():
         (2, "Dolphins"),
         (3, "Football"),
         (4, "Email"),
-        (5, "Facebook"),
-        (6, "Amazon"),
-        (7, "DBLP"),
-        (8, "YouTube")
+        (5, "Wiki Vote"),
+        (6, "Facebook"),
+        (7, "Amazon"),
+        (8, "DBLP"),
+        (9, "YouTube")
     ]
     embeddings = [
         (1, "deepwalk"),
@@ -265,7 +266,7 @@ def main():
 
 
     # ==== Configurable lambda weights for contrastive projection loss ====
-    LAMBDA_CONTRASTIVE = 2.0  # λ1: weight for contrastive loss
+    LAMBDA_CONTRASTIVE = 3.0  # λ1: weight for contrastive loss (tăng lên để tăng sức mạnh contrastive)
     LAMBDA_SUP = 0.5          # λ2: weight for supervised loss
 
     # Prompt user to select dataset
@@ -403,9 +404,13 @@ def main():
                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
         else:
             embedding_deepwalk_ae = embedding_deepwalk
-        emb_gat = gt_embedding(G, dim=feature_dim)
+        # Chỉ chạy GAT cho các dataset nhỏ (< 2000 nodes)
+        if G.number_of_nodes() < 2000:
+            emb_gat = gt_embedding(G, dim=feature_dim)
+        else:
+            emb_gat = None
         embedding_deepwalk_ae_contrast = contrastive_projection(
-            embedding_deepwalk_ae, out_dim=feature_dim, epochs=100, temperature=0.005,
+            embedding_deepwalk_ae, out_dim=feature_dim, epochs=100, temperature=0.002,
             comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
         results_table = []
         for emb_type, embedding_feature in [
