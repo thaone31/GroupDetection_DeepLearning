@@ -5,3 +5,4 @@ torch
 torch-geometric
 node2vec
 tensorflow
+pandas
