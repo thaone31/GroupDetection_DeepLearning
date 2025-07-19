@@ -1,17 +1,16 @@
-
 import numpy as np
 import networkx as nx
 from models.gae import GAE
 from evaluate import find_best_k
 from clustering import cluster_all
 from models.feature_utils import node_deep_sum, deepwalk_embedding, node2vec_embedding, deepwalk_enhanced_embedding
-from models.graph_transformer import graph_transformer_embedding as gt_embedding
 import tensorflow as tf
 from tensorflow.keras import layers, optimizers, losses, backend as K
 import tensorflow.keras.models as keras_models
 import pandas as pd
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from collections import defaultdict
+import inspect
 
 # --- Thêm: Bật memory growth cho GPU TensorFlow để tránh treo máy khi allocate toàn bộ GPU memory ---
 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -92,11 +91,9 @@ def main():
         (2, "node2vec"),
         (3, "node2vec_ae"),
         (4, "deepwalk_enhanced"),
-        (5, "graph_transformer"),
     ]
     models = [
-        (1, "GAE-GCN (baseline)"),
-        (2, "GAE-SAGE (GraphSAGE)")
+        (1, "GAE-GCN (baseline)")
     ]
     clustering_methods = [
         (1, "KMeans"),
@@ -189,39 +186,249 @@ def main():
     # Đồng bộ thông số embedding cho tất cả dataset
     walk_params = dict(num_walks=20, walk_length=40)
     feature_dim = 128
-    encoder_types = ["gcn", "sage"]
+    encoder_types = ["gcn"]  # Only use GCN encoder
     ae_epochs = 50  # Tăng epoch AE để học tốt hơn
     ae_batch_size = 64
     # Giảm batch_size cho các dataset lớn
     LARGE_DATASETS = ["DBLP", "YouTube", "Amazon"]
-    # === Contrastive learning utilities ===
-    def graph_augment(X, drop_prob=0.2):
-        mask = np.random.binomial(1, 1-drop_prob, X.shape)
-        return X * mask
+    # === Improved contrastive learning utilities ===
+    def graph_augment(X, drop_prob=0.2, noise_std=0.1):
+        """
+        Improved data augmentation with multiple strategies:
+        1. Feature dropout
+        2. Gaussian noise
+        3. Feature shuffling (within each sample)
+        """
+        X_aug = X.copy()
+        
+        # 1. Feature dropout
+        if drop_prob > 0:
+            mask = np.random.binomial(1, 1-drop_prob, X.shape)
+            X_aug = X_aug * mask
+        
+        # 2. Add small amount of Gaussian noise
+        if noise_std > 0:
+            noise = np.random.normal(0, noise_std, X.shape)
+            X_aug = X_aug + noise
+        
+        # 3. Random feature shuffling (5% of features per sample)
+        if np.random.random() < 0.3:  # 30% chance to apply feature shuffling
+            for i in range(X_aug.shape[0]):
+                n_shuffle = max(1, int(0.05 * X_aug.shape[1]))  # Shuffle 5% of features
+                shuffle_idx = np.random.choice(X_aug.shape[1], n_shuffle, replace=False)
+                X_aug[i, shuffle_idx] = np.random.permutation(X_aug[i, shuffle_idx])
+        
+        return X_aug.astype(np.float32)
 
-    def info_nce_loss(z1, z2, temperature=0.5):
+    def info_nce_loss(z1, z2, temperature=0.1):
+        # Improved InfoNCE loss with better numerical stability
         z1 = tf.math.l2_normalize(z1, axis=1)
         z2 = tf.math.l2_normalize(z2, axis=1)
         batch_size = tf.shape(z1)[0]
-        representations = tf.concat([z1, z2], axis=0)
+        
+        # Concatenate positive pairs
+        representations = tf.concat([z1, z2], axis=0)  # [2*batch_size, dim]
+        
+        # Compute similarity matrix
         similarity_matrix = tf.matmul(representations, representations, transpose_b=True)
-        mask = tf.eye(2*batch_size)
-        similarity_matrix = similarity_matrix * (1 - mask) - 1e9 * mask
-        similarity_matrix /= temperature
-        labels = tf.range(batch_size)
-        loss1 = tf.keras.losses.sparse_categorical_crossentropy(labels, similarity_matrix[:batch_size, batch_size:], from_logits=True)
-        loss2 = tf.keras.losses.sparse_categorical_crossentropy(labels, similarity_matrix[batch_size:, :batch_size], from_logits=True)
-        return tf.reduce_mean(loss1 + loss2)
+        
+        # Remove self-similarity (diagonal)
+        mask = tf.eye(2 * batch_size, dtype=tf.bool)
+        similarity_matrix = tf.where(mask, -tf.float32.max, similarity_matrix)
+        
+        # Scale by temperature
+        similarity_matrix = similarity_matrix / temperature
+        
+        # Create labels for positive pairs
+        # For i-th sample: positive is at position batch_size + i
+        labels_a = tf.range(batch_size, dtype=tf.int32) + batch_size  # [0->batch_size-1] maps to [batch_size->2*batch_size-1]
+        labels_b = tf.range(batch_size, dtype=tf.int32)               # [batch_size->2*batch_size-1] maps to [0->batch_size-1]
+        
+        # Compute cross-entropy loss for both directions
+        loss_a = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels_a,
+            logits=similarity_matrix[:batch_size]
+        )
+        loss_b = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels_b,
+            logits=similarity_matrix[batch_size:]
+        )
+        
+        return tf.reduce_mean(loss_a + loss_b)
 
-    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=128, temperature=0.005, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
-        batch_size = 128
+    def unsupervised_feature_enhancement(X, out_dim=64, epochs=50, batch_size=128):
+        """
+        Unsupervised feature enhancement cho các dataset không có ground truth
+        Sử dụng Variational Autoencoder (VAE) với regularization để học better representations
+        """
+        input_layer = layers.Input(shape=(X.shape[1],))
+        
+        # Encoder
+        x = layers.Dense(min(256, X.shape[1] * 2), activation='relu')(input_layer)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.2)(x)
+        
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.15)(x)
+        
+        # VAE latent space: mean and log_var
+        z_mean = layers.Dense(out_dim, name='z_mean')(x)
+        z_log_var = layers.Dense(out_dim, name='z_log_var')(x)
+        
+        # Sampling layer as a custom layer
+        class Sampling(layers.Layer):
+            def call(self, inputs):
+                z_mean, z_log_var = inputs
+                batch = tf.shape(z_mean)[0]
+                dim = tf.shape(z_mean)[1]
+                epsilon = tf.random.normal(shape=(batch, dim))
+                return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+        
+        z = Sampling()([z_mean, z_log_var])
+        
+        # Decoder
+        decoder_h = layers.Dense(128, activation='relu')
+        decoder_h2 = layers.Dense(min(256, X.shape[1] * 2), activation='relu')
+        decoder_mean = layers.Dense(X.shape[1], activation='linear')
+        
+        h_decoded = decoder_h(z)
+        h_decoded2 = decoder_h2(h_decoded)
+        x_decoded_mean = decoder_mean(h_decoded2)
+        
+        # Create models
+        encoder = keras_models.Model(input_layer, z_mean, name='encoder')  # Use mean for encoding
+        decoder_model = keras_models.Model(z, x_decoded_mean, name='decoder')
+        
+        # VAE model with custom training step
+        class VAE(keras_models.Model):
+            def __init__(self, encoder, decoder, **kwargs):
+                super(VAE, self).__init__(**kwargs)
+                self.encoder = encoder
+                self.decoder = decoder
+                self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+                self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
+                self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
+            
+            def call(self, inputs):
+                z_mean, z_log_var, z = self.encoder(inputs), self.encoder(inputs), self.encoder(inputs)
+                return self.decoder(z)
+            
+            def train_step(self, data):
+                with tf.GradientTape() as tape:
+                    # Forward pass
+                    z_mean = self.encoder(data)
+                    
+                    # Get z_log_var by accessing the layer output
+                    encoder_layers = self.encoder.layers
+                    z_log_var = None
+                    for layer in encoder_layers:
+                        if hasattr(layer, 'name') and 'z_log_var' in layer.name:
+                            z_log_var = layer(data)
+                    
+                    if z_log_var is None:
+                        # Fallback: create z_log_var layer
+                        z_log_var = layers.Dense(out_dim)(self.encoder.layers[-2].output)
+                    
+                    # Sample z
+                    batch = tf.shape(z_mean)[0]
+                    dim = tf.shape(z_mean)[1]
+                    epsilon = tf.random.normal(shape=(batch, dim))
+                    z = z_mean + tf.exp(0.5 * z_log_var) * epsilon
+                    
+                    # Decode
+                    reconstruction = self.decoder(z)
+                    
+                    # Compute losses
+                    reconstruction_loss = tf.reduce_mean(tf.square(data - reconstruction))
+                    kl_loss = -0.5 * tf.reduce_mean(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+                    total_loss = reconstruction_loss + 0.1 * kl_loss
+                
+                grads = tape.gradient(total_loss, self.trainable_weights)
+                self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+                
+                self.total_loss_tracker.update_state(total_loss)
+                self.reconstruction_loss_tracker.update_state(reconstruction_loss)
+                self.kl_loss_tracker.update_state(kl_loss)
+                
+                return {
+                    "loss": self.total_loss_tracker.result(),
+                    "reconstruction_loss": self.reconstruction_loss_tracker.result(),
+                    "kl_loss": self.kl_loss_tracker.result(),
+                }
+        
+        # Simplified approach: Use standard autoencoder with noise regularization
+        # This avoids the VAE complexity and still provides good representations
+        input_layer = layers.Input(shape=(X.shape[1],))
+        
+        # Encoder with bottleneck
+        encoded = layers.Dense(min(256, X.shape[1] * 2), activation='relu')(input_layer)
+        encoded = layers.BatchNormalization()(encoded)
+        encoded = layers.Dropout(0.3)(encoded)
+        
+        encoded = layers.Dense(128, activation='relu')(encoded)
+        encoded = layers.BatchNormalization()(encoded)
+        encoded = layers.Dropout(0.2)(encoded)
+        
+        # Bottleneck layer
+        bottleneck = layers.Dense(out_dim, activation='tanh')(encoded)  # tanh for bounded output
+        
+        # Decoder
+        decoded = layers.Dense(128, activation='relu')(bottleneck)
+        decoded = layers.BatchNormalization()(decoded)
+        decoded = layers.Dropout(0.2)(decoded)
+        
+        decoded = layers.Dense(min(256, X.shape[1] * 2), activation='relu')(decoded)
+        decoded = layers.BatchNormalization()(decoded)
+        
+        output = layers.Dense(X.shape[1], activation='linear')(decoded)
+        
+        # Models
+        autoencoder = keras_models.Model(input_layer, output)
+        encoder = keras_models.Model(input_layer, bottleneck)
+        
+        # Custom loss with regularization
+        def enhanced_loss(y_true, y_pred):
+            reconstruction_loss = tf.reduce_mean(tf.square(y_true - y_pred))
+            # Add L2 regularization to encourage smooth representations
+            bottleneck_output = encoder(y_true)
+            l2_reg = 0.01 * tf.reduce_mean(tf.square(bottleneck_output))
+            return reconstruction_loss + l2_reg
+        
+        autoencoder.compile(
+            optimizer=optimizers.Adam(learning_rate=0.001),
+            loss=enhanced_loss
+        )
+        
+        # Training with data augmentation
+        for epoch in range(epochs):
+            # Add small noise for regularization
+            X_noisy = X + np.random.normal(0, 0.01, X.shape).astype(np.float32)
+            autoencoder.fit(X_noisy, X, epochs=1, batch_size=min(batch_size, X.shape[0]), verbose=0)
+        
+        # Get enhanced features
+        enhanced = encoder.predict(X)
+        K.clear_session()
+        return enhanced
+
+    def contrastive_projection(X, out_dim=64, epochs=30, batch_size=128, temperature=0.1, comm_labels=None, lambda_contrastive=1.0, lambda_sup=1.0):
+        # Cải thiện architecture và hyperparameters
+        batch_size = min(128, X.shape[0])  # Đảm bảo batch_size không lớn hơn số mẫu
         out_dim = 64
         input_layer = layers.Input(shape=(X.shape[1],))
-        proj = layers.Dense(out_dim, activation='relu')(input_layer)
-        proj = layers.BatchNormalization()(proj)
-        proj = layers.Dropout(0.15)(proj)
-        proj = layers.Dense(out_dim, activation=None)(proj)
-        proj = layers.BatchNormalization()(proj)
+        
+        # Improved architecture với gradual dimension reduction
+        x = layers.Dense(min(256, X.shape[1] * 2), activation='relu')(input_layer)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.3)(x)  # Tăng dropout để regularize
+        
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.2)(x)
+        
+        proj = layers.Dense(out_dim, activation=None)(x)  # No activation for final projection
+        proj = layers.LayerNormalization()(proj)  # LayerNorm thay vì BatchNorm
+        
         # Classifier head for supervised loss (if labels available)
         n_classes = int(np.max(comm_labels)) + 1 if comm_labels is not None and len(np.unique(comm_labels)) > 1 else 1
         if n_classes > 1:
@@ -232,11 +439,21 @@ def main():
         else:
             projection_model = keras_models.Model(input_layer, proj)
             y_class = None
-        optimizer = optimizers.Adam(learning_rate=0.001)
+            
+        # Improved optimizer with learning rate scheduling
+        initial_lr = 0.001
+        optimizer = optimizers.Adam(learning_rate=initial_lr, beta_1=0.9, beta_2=0.999, epsilon=1e-7)
+        
         for epoch in range(epochs):
+            # Learning rate decay
+            current_lr = initial_lr * (0.95 ** (epoch // 10))
+            optimizer.learning_rate = current_lr
+            
+            # Improved augmentation strategy với controlled randomness
             idx = np.random.permutation(X.shape[0])
-            X1 = graph_augment(X[idx])
-            X2 = graph_augment(X[idx])
+            X1 = graph_augment(X[idx], drop_prob=0.1, noise_std=0.05)  # Light augmentation
+            X2 = graph_augment(X[idx], drop_prob=0.15, noise_std=0.08)  # Slightly stronger augmentation
+            
             with tf.GradientTape() as tape:
                 if n_classes > 1:
                     z1, class_pred1 = projection_model(X1, training=True)
@@ -244,7 +461,9 @@ def main():
                 else:
                     z1 = projection_model(X1, training=True)
                     z2 = projection_model(X2, training=True)
+                
                 loss_contrastive = info_nce_loss(z1, z2, temperature=temperature)
+                
                 # Supervised loss (cross-entropy) for both views
                 if n_classes > 1 and y_class is not None:
                     sup_loss1 = losses.CategoricalCrossentropy()(y_class[idx], class_pred1)
@@ -252,11 +471,17 @@ def main():
                     sup_loss = (sup_loss1 + sup_loss2) / 2.0
                 else:
                     sup_loss = 0.0
+                    
                 loss = lambda_contrastive * loss_contrastive + lambda_sup * sup_loss
+                
+            # Gradient clipping để tránh exploding gradients
             grads = tape.gradient(loss, projection_model.trainable_weights)
-            optimizer.apply_gradients(zip(grads, projection_model.trainable_weights))
+            clipped_grads = [tf.clip_by_norm(grad, 1.0) if grad is not None else grad for grad in grads]
+            optimizer.apply_gradients(zip(clipped_grads, projection_model.trainable_weights))
+            
             if epoch % 20 == 0:
-                print(f"Contrastive epoch {epoch}, loss={loss.numpy():.4f}, contrastive={loss_contrastive.numpy():.4f}, sup={sup_loss.numpy() if n_classes > 1 and y_class is not None else 0.0}, temperature={temperature}")
+                print(f"Contrastive epoch {epoch}, loss={loss.numpy():.4f}, contrastive={loss_contrastive.numpy():.4f}, sup={sup_loss.numpy() if n_classes > 1 and y_class is not None else 0.0:.4f}, lr={current_lr:.6f}, temperature={temperature}")
+        
         if n_classes > 1:
             out, _ = projection_model.predict(X)
         else:
@@ -266,18 +491,18 @@ def main():
 
 
     # ==== Configurable lambda weights for contrastive projection loss ====
-    LAMBDA_CONTRASTIVE = 3.0  # λ1: weight for contrastive loss (tăng lên để tăng sức mạnh contrastive)
-    LAMBDA_SUP = 0.5          # λ2: weight for supervised loss
+    LAMBDA_CONTRASTIVE = 1.0  # λ1: weight for contrastive loss (giảm xuống để cân bằng)
+    LAMBDA_SUP = 0.3          # λ2: weight for supervised loss (giảm để tập trung vào contrastive)
 
-    # Prompt user to select dataset
-    print("=== Chọn dataset để chạy 20 lần ===")
+    # Prompt user to select dataset and number of runs
+    print("=== Chọn dataset để chạy ===")
     for i, name in datasets:
         print(f"{i}. {name}")
-    ds_choice = int(input(f"Nhập số (1-{len(datasets)}): "))
+    ds_choice = int(input(f"Nhập số dataset (1-{len(datasets)}): "))
     ds_name = dict(datasets)[ds_choice]
-    print(f"[INFO] Đang chạy 1 lần trên dataset: {ds_name}")
-
-    N_RUNS = 20
+    
+    N_RUNS = int(input("Nhập số lần chạy (ví dụ: 20): "))
+    print(f"[INFO] Đang chạy {N_RUNS} lần trên dataset: {ds_name}")
     all_results = []
     for run in range(N_RUNS):
         print(f"\n================= RUN {run+1}/{N_RUNS} =================")
@@ -311,8 +536,10 @@ def main():
         embedding_deepwalk = embedding_deepwalk.astype(np.float32)
         if embedding_deepwalk.shape[1] > feature_dim:
             print(f"[Autoencoder] Đang giảm chiều deepwalk từ {embedding_deepwalk.shape[1]} về {feature_dim} với Laplacian regularization (paper-like) và supervised loss...")
-            def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, verbose=0, laplacian_reg=True, reg_weight=1.0,
-                                            lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0):
+            def autoencoder_reduce_with_graph(X, out_dim, epochs=100, batch_size=32, 
+                                            G=None, ground_truth=None, verbose=0,
+                                            lambda_recon=1.0, lambda_mod=0.1, 
+                                            lambda_neigh=0.1, lambda_sup=1.0):
                 input_dim = X.shape[1]
                 input_layer = layers.Input(shape=(input_dim,))
                 hidden_dim = max(out_dim * 2, 32)
@@ -404,26 +631,29 @@ def main():
                 lambda_recon=1.0, lambda_mod=0.1, lambda_neigh=0.1, lambda_sup=1.0)
         else:
             embedding_deepwalk_ae = embedding_deepwalk
-        # Chỉ chạy GAT cho các dataset nhỏ (< 2000 nodes)
-        if G.number_of_nodes() < 2000:
-            emb_gat = gt_embedding(G, dim=feature_dim)
+        # Generate enhanced features based on ground truth availability
+        if ground_truth is not None and len(np.unique(ground_truth)) > 1:
+            print(f"[INFO] Có ground truth ({len(np.unique(ground_truth))} classes), sẽ dùng contrastive learning...")
+            embedding_deepwalk_enhanced = contrastive_projection(
+                embedding_deepwalk_ae, out_dim=feature_dim, epochs=150, temperature=0.05,
+                comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
+            enhancement_name = "deepwalk_ae_contrast"
         else:
-            emb_gat = None
-        embedding_deepwalk_ae_contrast = contrastive_projection(
-            embedding_deepwalk_ae, out_dim=feature_dim, epochs=100, temperature=0.002,
-            comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
+            print(f"[INFO] Không có ground truth, dùng VAE enhancement...")
+            embedding_deepwalk_enhanced = unsupervised_feature_enhancement(
+                embedding_deepwalk_ae, out_dim=feature_dim, epochs=80)
+            enhancement_name = "deepwalk_ae_vae"
         results_table = []
         for emb_type, embedding_feature in [
                 ("deepwalk", embedding_deepwalk),
                 ("node2vec", embedding_node2vec),
-                ("gat", emb_gat),
                 ("deepwalk_ae", embedding_deepwalk_ae),
-                ("deepwalk_ae_contrast", embedding_deepwalk_ae_contrast)
+                (enhancement_name, embedding_deepwalk_enhanced)
             ]:
             if embedding_feature is None:
                 continue
             for encoder_type in encoder_types:
-                print(f"\n==== Dataset={ds_name}, Embedding={emb_type}, Model=GAE, Encoder={encoder_type}, feature_dim={embedding_feature.shape[1]} ====")
+                print(f"\n==== Dataset={ds_name}, Embedding={emb_type}, Model=GAE, feature_dim={embedding_feature.shape[1]} ====")
                 model_kwargs = {"feature_type": "custom", "feature_dim": embedding_feature.shape[1]}
                 model = GAE(**model_kwargs)
                 model.fit(G, features=embedding_feature, encoder_type=encoder_type)
@@ -467,37 +697,49 @@ def main():
                     results_table.append({
                         "Dataset": ds_name,
                         "Embedding": emb_type,
-                        "Encoder": encoder_type,
                         "ClusterMethod": method,
-                        "BestK": best_k,
                         "Modularity": metrics['modularity'],
                         "Silhouette": metrics['silhouette'],
-                        "NumClusters": len(set(metrics['labels'])),
                         "ARI": ari_val,
                         "NMI": nmi_val,
                         "Conductance": conductance_val,
                         "Coverage": coverage_val
                     })
-                    print(f"  - {method}: Modularity={metrics['modularity']}, Silhouette={metrics['silhouette']}, Số cụm={len(set(metrics['labels']))}, ARI={ari_val}, NMI={nmi_val}, Conductance={conductance_val:.4f}, Coverage={coverage_val:.4f}")
+                    # Format values properly, handling None cases
+                    mod_str = f"{metrics['modularity']:.4f}" if metrics['modularity'] is not None else "N/A"
+                    sil_str = f"{metrics['silhouette']:.4f}" if metrics['silhouette'] is not None else "N/A"
+                    ari_str = f"{ari_val:.4f}" if ari_val is not None else "N/A"
+                    nmi_str = f"{nmi_val:.4f}" if nmi_val is not None else "N/A"
+                    cond_str = f"{conductance_val:.4f}" if conductance_val is not None else "N/A"
+                    cov_str = f"{coverage_val:.4f}" if coverage_val is not None else "N/A"
+                    
+                    print(f"  - {method}: Modularity={mod_str}, Silhouette={sil_str}, ARI={ari_str}, NMI={nmi_str}, Conductance={cond_str}, Coverage={cov_str}")
+        
         run_results.extend(results_table)
+        
         # In bảng kết quả từng lần chạy
         if run_results:
             run_df = pd.DataFrame(run_results)
             print(f"\n===== BẢNG KẾT QUẢ RUN {run+1}/{N_RUNS} =====")
             print(run_df.to_string(index=False))
         all_results.extend(run_results)
+    
+    # Statistical summary processing
     if all_results:
         df = pd.DataFrame(all_results)
-        group_cols = ["Dataset", "Embedding", "Encoder", "ClusterMethod"]
+        group_cols = ["Dataset", "Embedding", "ClusterMethod"]
         mean_df = df.groupby(group_cols).mean(numeric_only=True).reset_index()
         std_df = df.groupby(group_cols).std(numeric_only=True).reset_index()
         min_df = df.groupby(group_cols).min(numeric_only=True).reset_index()
         max_df = df.groupby(group_cols).max(numeric_only=True).reset_index()
-        print("\n===== BẢNG KẾT QUẢ THỐNG KÊ QUA 20 LẦN CHẠY (mean ± std, min, max) =====")
+        
+        print(f"\n===== BẢNG KẾT QUẢ THỐNG KÊ QUA {N_RUNS} LẦN CHẠY (mean ± std, min, max) =====")
+        
         def format_stats(mean, std, minv, maxv):
             if np.isnan(std):
                 return f"{mean:.4f} (min={minv:.4f}, max={maxv:.4f})"
             return f"{mean:.4f} ± {std:.4f} (min={minv:.4f}, max={maxv:.4f})"
+        
         merged = mean_df.copy()
         for col in mean_df.columns:
             if col in group_cols:
@@ -506,9 +748,13 @@ def main():
                 format_stats(m, s, mi, ma)
                 for m, s, mi, ma in zip(mean_df[col], std_df[col], min_df[col], max_df[col])
             ]
+        
         print(merged.to_string(index=False))
-        # Xuất ra file csv nếu muốn trực quan hóa thêm
-        merged.to_csv("statistical_summary.csv", index=False)
+        
+        # Save to CSV
+        csv_filename = f"statistical_summary_{ds_name}_{N_RUNS}runs.csv"
+        merged.to_csv(csv_filename, index=False)
+        print(f"[INFO] Đã lưu kết quả thống kê vào file: {csv_filename}")
 
 
 if __name__ == "__main__":

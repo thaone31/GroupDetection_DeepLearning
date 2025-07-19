@@ -36,13 +36,8 @@ class GAE:
             x = torch.eye(G.number_of_nodes(), dtype=torch.float)
         data.x = x
 
-        # Choose encoder
-        if encoder_type == "sage":
-            from models.sage import SAGE as EncoderImpl
-        else:
-            EncoderImpl = Encoder
-
-        encoder = EncoderImpl(in_channels=x.shape[1], out_channels=self.out_channels)
+        # Only use GCN encoder
+        encoder = Encoder(in_channels=x.shape[1], out_channels=self.out_channels)
         # Add classifier head for semi-supervised
         num_classes = None
         if labels is not None and (labels >= 0).sum() > 0:
