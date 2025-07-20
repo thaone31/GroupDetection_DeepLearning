@@ -26,16 +26,16 @@ Input Graph G
    ✅ YES                           ❌ NO
    (Karate, Football)               (Dolphins, Email)
    ↓                                ↓
-📊 Contrastive Learning Branch      🔧 VAE Enhancement Branch
-   ├── Data Augmentation            ├── Denoising AutoEncoder
-   │   - Feature Dropout (10-15%)   │   - Gaussian Noise (σ=0.01)
-   │   - Gaussian Noise (σ=0.05)    │   - L2 Regularization (λ=0.01)
-   │   - Feature Shuffling (5%)     │   - Tanh Bottleneck
-   ├── InfoNCE Loss                 ├── Reconstruction Loss
-   ├── Supervised Loss              ├── Regularization Loss
-   └── Gradient Clipping            └── Noise Robustness
+📊 Contrastive Learning Branch      ⏹️ No Additional Enhancement
+   ├── Data Augmentation            ├── Use deepwalk_ae as final
+   │   - Feature Dropout (10-15%)   │   embedding
+   │   - Gaussian Noise (σ=0.05)    └── Proceed to GAE-GCN
+   │   - Feature Shuffling (5%)     
+   ├── InfoNCE Loss                 
+   ├── Supervised Loss              
+   └── Gradient Clipping            
    ↓                                ↓
-deepwalk_ae_contrast              deepwalk_ae_vae
+deepwalk_ae_contrast              deepwalk_ae (final)
    ↓                                ↓
    └─────────────────┬─────────────────┘
                      ↓
@@ -64,22 +64,18 @@ Dense(128) → BatchNorm → Dropout(0.2) →
 Dense(64) → LayerNorm → [Projection Head | Classifier]
 ```
 
-### ❌ VAE Enhancement Branch (Unsupervised)
+### ❌ No Enhancement Branch (Unsupervised)
 **Used when**: No ground truth available
 **Datasets**: Dolphins, Email, Facebook, etc.
 **Key Features**:
-- Denoising autoencoder approach
-- L2 regularization on bottleneck
-- Bounded representations (Tanh activation)
-- Noise injection during training
-- Reconstruction + regularization loss
+- Uses `deepwalk_ae` embedding directly
+- No additional enhancement layer
+- Simpler and more stable for unsupervised scenarios
+- Avoids overfitting on unlabeled data
 
 **Architecture**:
 ```
-Input → Dense(256) → BatchNorm → Dropout(0.3) →
-Dense(128) → BatchNorm → Dropout(0.2) →
-Dense(64, tanh) → Dense(128) → BatchNorm →
-Dense(256) → Dense(input_dim)
+deepwalk_ae → GAE-GCN Clustering
 ```
 
 ## 🔧 Implementation Details
@@ -93,11 +89,10 @@ Dense(256) → Dense(input_dim)
 - Epochs: 150
 - Learning rate: 0.001 → decay 5% per 10 epochs
 
-**VAE Enhancement**:
-- L2 regularization: 0.01
-- Noise std: 0.01
-- Epochs: 80
-- Learning rate: 0.001
+**Unsupervised (No Enhancement)**:
+- Uses deepwalk_ae directly
+- No additional hyperparameters
+- Faster training and inference
 
 **AutoEncoder (Base)**:
 - Hidden dim: max(out_dim * 2, 32)

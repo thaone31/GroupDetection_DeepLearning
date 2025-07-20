@@ -51,14 +51,35 @@ def load_dataset(choice):
         name = "Facebook"
         ground_truth = None
     elif choice == 7:
+        # Large Communities Dataset (500 nodes, 5 communities) - HAS GROUND TRUTH
+        G = nx.read_edgelist('datasets/large_communities_500.txt', nodetype=int)
+        name = "Large Communities (500)"
+        import pickle
+        with open('datasets/large_communities_500_gt.pkl', 'rb') as f:
+            ground_truth = pickle.load(f)
+    elif choice == 8:
+        # Political Books Dataset (400 nodes, 3 communities) - HAS GROUND TRUTH  
+        G = nx.read_edgelist('datasets/polbooks_400.txt', nodetype=int)
+        name = "Political Books (400)"
+        import pickle
+        with open('datasets/polbooks_400_gt.pkl', 'rb') as f:
+            ground_truth = pickle.load(f)
+    elif choice == 9:
+        # Medium Communities Dataset (200 nodes, 4 communities) - HAS GROUND TRUTH
+        G = nx.read_edgelist('datasets/medium_communities_200.txt', nodetype=int)
+        name = "Medium Communities (200)"
+        import pickle
+        with open('datasets/medium_communities_200_gt.pkl', 'rb') as f:
+            ground_truth = pickle.load(f)
+    elif choice == 10:
         G = nx.read_edgelist('datasets/com-amazon.ungraph.txt', nodetype=int)
         name = "Amazon"
         ground_truth = None
-    elif choice == 8:
+    elif choice == 11:
         G = nx.read_edgelist('datasets/com-dblp.ungraph.txt', nodetype=int)
         name = "DBLP"
         ground_truth = None
-    elif choice == 9:
+    elif choice == 12:
         G = nx.read_edgelist('datasets/com-youtube.ungraph.txt', nodetype=int)
         name = "YouTube"
         ground_truth = None
@@ -82,9 +103,12 @@ def main():
         (4, "Email"),
         (5, "Wiki Vote"),
         (6, "Facebook"),
-        (7, "Amazon"),
-        (8, "DBLP"),
-        (9, "YouTube")
+        (7, "Large Communities (500)"),     # NEW: 500 nodes, 5 communities
+        (8, "Political Books (400)"),       # NEW: 400 nodes, 3 communities  
+        (9, "Medium Communities (200)"),    # NEW: 200 nodes, 4 communities
+        (10, "Amazon"),
+        (11, "DBLP"),
+        (12, "YouTube")
     ]
     embeddings = [
         (1, "deepwalk"),
@@ -190,7 +214,7 @@ def main():
     ae_epochs = 50  # Tăng epoch AE để học tốt hơn
     ae_batch_size = 64
     # Giảm batch_size cho các dataset lớn
-    LARGE_DATASETS = ["DBLP", "YouTube", "Amazon"]
+    LARGE_DATASETS = ["DBLP", "YouTube", "Amazon", "Large Communities (500)", "Political Books (400)"]
     # === Improved contrastive learning utilities ===
     def graph_augment(X, drop_prob=0.2, noise_std=0.1):
         """
@@ -639,17 +663,23 @@ def main():
                 comm_labels=comm_labels, lambda_contrastive=LAMBDA_CONTRASTIVE, lambda_sup=LAMBDA_SUP)
             enhancement_name = "deepwalk_ae_contrast"
         else:
-            print(f"[INFO] Không có ground truth, dùng VAE enhancement...")
-            embedding_deepwalk_enhanced = unsupervised_feature_enhancement(
-                embedding_deepwalk_ae, out_dim=feature_dim, epochs=80)
-            enhancement_name = "deepwalk_ae_vae"
+            print(f"[INFO] Không có ground truth, chỉ dùng AE embedding...")
+            embedding_deepwalk_enhanced = None  # Không enhancement thêm
+            enhancement_name = None
         results_table = []
-        for emb_type, embedding_feature in [
-                ("deepwalk", embedding_deepwalk),
-                ("node2vec", embedding_node2vec),
-                ("deepwalk_ae", embedding_deepwalk_ae),
-                (enhancement_name, embedding_deepwalk_enhanced)
-            ]:
+        
+        # Embeddings to test
+        embeddings_to_test = [
+            ("deepwalk", embedding_deepwalk),
+            ("node2vec", embedding_node2vec),
+            ("deepwalk_ae", embedding_deepwalk_ae)
+        ]
+        
+        # Add enhanced embedding only if it exists (i.e., when ground truth is available)
+        if embedding_deepwalk_enhanced is not None and enhancement_name is not None:
+            embeddings_to_test.append((enhancement_name, embedding_deepwalk_enhanced))
+        
+        for emb_type, embedding_feature in embeddings_to_test:
             if embedding_feature is None:
                 continue
             for encoder_type in encoder_types:
